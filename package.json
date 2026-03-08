@@ -1,19 +1,12 @@
 {
-  "name": "shinzhost-api",
+  "name": "shinzhost-bot-server",
   "version": "1.0.0",
-  "description": "ShinzHost bot runner API",
-  "main": "src/index.js",
-  "type": "module",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
     "adm-zip": "^0.5.10",
-    "axios": "^1.6.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.2"
+    "node-fetch": "^2.7.0"
   }
 }

@@ -45,9 +45,15 @@ function scheduleAutoStop() {
   }, 24 * 60 * 60 * 1000);
 }
 
-// POST /upload — accepts a .zip file, extracts + runs npm install + npm start
+// POST /upload — accepts a .zip file + optional env vars, extracts + runs npm install + npm start
 app.post("/upload", upload.single("bot"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded." });
+
+  // Parse extra env vars sent from the dashboard (JSON string)
+  let extraEnv = {};
+  try {
+    if (req.body.env) extraEnv = JSON.parse(req.body.env);
+  } catch { /* ignore parse errors */ }
 
   // Kill existing bot if running
   killBot();
@@ -100,8 +106,12 @@ app.post("/upload", upload.single("bot"), async (req, res) => {
       log("✅ npm install done. Starting bot...");
       botStatus = "running";
 
-      // npm start
-      botProcess = spawn("npm", ["start"], { cwd: botDir, shell: true });
+      // npm start — inject env vars from dashboard
+      botProcess = spawn("npm", ["start"], {
+        cwd: botDir,
+        shell: true,
+        env: { ...process.env, ...extraEnv },
+      });
 
       botProcess.stdout.on("data", (d) => log(`[bot] ${d.toString().trim()}`));
       botProcess.stderr.on("data", (d) => log(`[bot ERR] ${d.toString().trim()}`));

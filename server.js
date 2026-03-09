@@ -12,12 +12,10 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Upload storage
 const upload = multer({ dest: "uploads/" });
 
-// Track running bot process
 let botProcess = null;
-let botStatus = "idle"; // idle | installing | running | error | stopped
+let botStatus = "idle";
 let botLogs = [];
 let botStartTime = null;
 
@@ -25,7 +23,7 @@ function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`;
   console.log(line);
   botLogs.push(line);
-  if (botLogs.length > 200) botLogs.shift(); // keep last 200 lines
+  if (botLogs.length > 200) botLogs.shift();
 }
 
 function killBot() {
@@ -37,7 +35,6 @@ function killBot() {
   }
 }
 
-// Auto-stop after 24 hours
 function scheduleAutoStop() {
   setTimeout(() => {
     log("⏰ 24 hours reached. Auto-stopping bot.");
@@ -45,17 +42,31 @@ function scheduleAutoStop() {
   }, 24 * 60 * 60 * 1000);
 }
 
-// POST /upload — accepts a .zip file + optional env vars, extracts + runs npm install + npm start
+// Parse a .env file into an object
+function parseDotEnv(filePath) {
+  const result = {};
+  const lines = fs.readFileSync(filePath, "utf8").split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    const value = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, "");
+    result[key] = value;
+  }
+  return result;
+}
+
 app.post("/upload", upload.single("bot"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded." });
 
-  // Parse extra env vars sent from the dashboard (JSON string)
-  let extraEnv = {};
+  // Env vars from dashboard (override .env file if same key)
+  let dashboardEnv = {};
   try {
-    if (req.body.env) extraEnv = JSON.parse(req.body.env);
-  } catch { /* ignore parse errors */ }
+    if (req.body.env) dashboardEnv = JSON.parse(req.body.env);
+  } catch { /* ignore */ }
 
-  // Kill existing bot if running
   killBot();
   botLogs = [];
   botStatus = "installing";
@@ -68,31 +79,52 @@ app.post("/upload", upload.single("bot"), async (req, res) => {
   log(`📂 Extracting to: ${extractDir}`);
 
   try {
-    // Extract ZIP
     await fs.createReadStream(zipPath)
       .pipe(unzipper.Extract({ path: extractDir }))
       .promise();
 
-    fs.unlinkSync(zipPath); // clean up upload
+    fs.unlinkSync(zipPath);
 
-    // Find the actual bot folder (handle nested zip structure)
+    // Handle nested folder in zip
     let botDir = extractDir;
     const entries = fs.readdirSync(extractDir);
     if (entries.length === 1 && fs.statSync(path.join(extractDir, entries[0])).isDirectory()) {
       botDir = path.join(extractDir, entries[0]);
     }
 
-    // Check for package.json
     if (!fs.existsSync(path.join(botDir, "package.json"))) {
       botStatus = "error";
       return res.status(400).json({ error: "No package.json found in zip." });
     }
 
+    // Load .env from zip if present
+    let zipEnv = {};
+    const envFilePath = path.join(botDir, ".env");
+    if (fs.existsSync(envFilePath)) {
+      log("🔍 Found .env in zip — loading...");
+      zipEnv = parseDotEnv(envFilePath);
+      for (const [key, value] of Object.entries(zipEnv)) {
+        const isPlaceholder = value === "" || value.toLowerCase().includes("your_") || value.toLowerCase().includes("_here");
+        if (isPlaceholder) {
+          log(`⚠️  PLACEHOLDER: ${key}="${value}" — fill this in your .env before zipping!`);
+        } else {
+          log(`✅ .env loaded: ${key}`);
+        }
+      }
+    } else {
+      log("ℹ️  No .env in zip — using dashboard env vars only.");
+    }
+
+    // Merge: zip .env is base, dashboard vars override
+    const finalEnv = { ...process.env, ...zipEnv, ...dashboardEnv };
+
+    if (Object.keys(dashboardEnv).length > 0) {
+      log(`🔑 Dashboard overrides applied for: ${Object.keys(dashboardEnv).join(", ")}`);
+    }
+
     log("📦 Running npm install...");
 
-    // npm install
     const install = spawn("npm", ["install"], { cwd: botDir, shell: true });
-
     install.stdout.on("data", (d) => log(`[npm install] ${d.toString().trim()}`));
     install.stderr.on("data", (d) => log(`[npm install ERR] ${d.toString().trim()}`));
 
@@ -106,11 +138,10 @@ app.post("/upload", upload.single("bot"), async (req, res) => {
       log("✅ npm install done. Starting bot...");
       botStatus = "running";
 
-      // npm start — inject env vars from dashboard
       botProcess = spawn("npm", ["start"], {
         cwd: botDir,
         shell: true,
-        env: { ...process.env, ...extraEnv },
+        env: finalEnv,
       });
 
       botProcess.stdout.on("data", (d) => log(`[bot] ${d.toString().trim()}`));
@@ -134,34 +165,19 @@ app.post("/upload", upload.single("bot"), async (req, res) => {
   }
 });
 
-// GET /status — returns current bot status + logs
 app.get("/status", (req, res) => {
-  const uptime = botStartTime
-    ? Math.floor((Date.now() - botStartTime) / 1000)
-    : 0;
-
-  const timeLeft = botStartTime
-    ? Math.max(0, 86400 - uptime)
-    : 0;
-
-  res.json({
-    status: botStatus,
-    uptime,
-    timeLeft,
-    logs: botLogs.slice(-50), // last 50 lines
-  });
+  const uptime = botStartTime ? Math.floor((Date.now() - botStartTime) / 1000) : 0;
+  const timeLeft = botStartTime ? Math.max(0, 86400 - uptime) : 0;
+  res.json({ status: botStatus, uptime, timeLeft, logs: botLogs.slice(-50) });
 });
 
-// POST /stop — manually stop the bot
 app.post("/stop", (req, res) => {
   killBot();
   res.json({ success: true, message: "Bot stopped." });
 });
 
-// Health check
 app.get("/", (req, res) => res.json({ ok: true, message: "Bot host running." }));
 
-// Create necessary folders
 ["uploads", "bots"].forEach((dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
